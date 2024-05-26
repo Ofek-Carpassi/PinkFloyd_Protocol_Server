@@ -11,9 +11,10 @@ The PINKFLOYD protocol message format is as follows:
 TYPE:<3-bit binary number>|DATA:<message data>
 """
 
-import select # Used to monitor multiple sockets
-import socket # Used to create sockets
-import errno # Used to handle socket errors
+import re  # Added for regular expressions
+import select  # Used to monitor multiple sockets
+import socket  # Used to create sockets
+import errno  # Used to handle socket errors
 
 # Constants
 BUFFER_SIZE = 1024
@@ -34,245 +35,267 @@ NO_SONGS_FOUND_ERROR = "No songs found"
 NO_ALBUMS_FOUND_ERROR = "No albums found"
 DB_FILE = "Pink_Floyd_DB.txt"
 
+# Data dictionary to store the information from the database file
+data_dict = {
+    # The keys in this dictionary are the different types of data that the server has.
+    "albumsList": [],
+    "songsInAlbum": {},
+    "lengthOfSong": {},
+    "lyricsOfSong": {},
+    "albumOfSong": {},
+    "songsWithWordInTitle": {},
+    "songsWithWordInLyrics": {}
+}
+
 def main():
-    # Create a socket to listen for incoming connections
-    LISTENING_PORT = 1965
+    # Initialize the data dictionary
+    initialize_data_dict()
+
+    # Set up the server socket
+    listening_socket = setup_server_socket(1965)
+
+    # Print the port the server is listening on
+    print("Server is listening on port", listening_socket.getsockname()[1])
+    
+    # List of sockets to monitor for incoming data
+    inputs = [listening_socket]
+
+    while True:
+        # Wait for a socket to be ready for reading or to raise an exception
+        readable, _, exceptional = select.select(inputs, [], inputs)
+
+        # Handle the sockets that are ready for reading
+        for s in readable:
+            # If the socket is the listening socket, accept a new connection
+            if s is listening_socket:
+                handle_new_connection(s, inputs)
+            # If the socket is a client socket, handle the data
+            else:
+                handle_client_data(s, inputs)
+
+        # Handle sockets that have raised an exception
+        for s in exceptional:
+            handle_socket_exception(s, inputs)
+
+# Initialize the data dictionary
+def initialize_data_dict():
+    # Initialize the data dictionary with the data from the database file
+    data_dict["albumsList"] = getAlbumsList()
+
+    # Populate the data dictionary with additional information
+    for album in data_dict["albumsList"]:
+        # Initialize the songsInAlbum dictionary with an empty list for each album
+        data_dict["songsInAlbum"][album] = getSongsInAlbum(album)
+
+        # Populate the lengthOfSong, lyricsOfSong, and albumOfSong dictionaries
+        for song in data_dict["songsInAlbum"][album]:
+            # Add the length of the song to the lengthOfSong dictionary
+            data_dict["lengthOfSong"][song] = getLengthOfSong(song)
+            # Add the lyrics of the song to the lyricsOfSong dictionary
+            data_dict["lyricsOfSong"][song] = getLyricsOfSong(song)
+            # Add the album of the song to the albumOfSong dictionary
+            data_dict["albumOfSong"][song] = getAlbumOfSong(song)
+
+            # Populate the songsWithWordInTitle and songsWithWordInLyrics dictionaries
+            for word in song.split():
+                # If the word is not already in the dictionary, create a new list for it
+                if word.lower() not in data_dict["songsWithWordInTitle"]:
+                    data_dict["songsWithWordInTitle"][word.lower()] = []
+                # Add the song to the list of songs with the word in the title
+                data_dict["songsWithWordInTitle"][word.lower()].append(song)
+
+            # Populate the songsWithWordInLyrics dictionary
+            lyrics = '\n'.join(data_dict["lyricsOfSong"][song])
+
+            # Use regular expressions to extract words from the lyrics
+            word_list = re.findall(r'\w+', lyrics.lower())  
+
+            # Add the song to the list of songs with each word in the lyrics
+            for word in set(word_list):  
+                if word not in data_dict["songsWithWordInLyrics"]:
+                    data_dict["songsWithWordInLyrics"][word] = []
+                data_dict["songsWithWordInLyrics"][word].append(song)
+
+# Set up the server socket
+def setup_server_socket(port):
+    # Create a new socket
     listening_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-    # Try to bind the socket to the listening port
+    # Set the socket options to allow the port to be reused immediately after the socket is closed
     while True:
         try:
-            listening_socket.bind(('', LISTENING_PORT))
-            break
-        # If the port is already in use, try the next port
+            # Bind the socket to the specified port and start listening for incoming connections
+            listening_socket.bind(('', port))
+            listening_socket.listen(1)
+            return listening_socket
+        # Handle the case where the port is already in use
         except socket.error as e:
+            # Try the next port
             if e.errno == errno.EADDRINUSE:
-                print(f"Port {LISTENING_PORT} is already in use.")
-                # Try the next port
-                LISTENING_PORT += 1
-                print(f"Trying to bind to port {LISTENING_PORT} instead.")
-            # If there is another error, raise it
+                print(f"Port {port} is already in use.")
+                port += 1
+                print(f"Trying to bind to port {port} instead.")
             else:
                 raise
 
-    # Start listening for incoming connections
-    listening_socket.listen(1)
-    print("Server is listening on port", LISTENING_PORT)
+# Handle a new connection
+def handle_new_connection(listening_socket, inputs):
+    # Accept the new connection
+    client_socket, client_address = listening_socket.accept()
+    print("Connection from", client_address)
+    # Add the new client socket to the list of inputs to monitor
+    inputs.append(client_socket)
 
-    inputs = [listening_socket]  # Create a list of sockets to monitor for incoming data
-
-    while True:
-        # Wait for a socket to become readable
-        readable, _, exceptional = select.select(inputs, [], inputs)
-
-        # Iterate over the readable sockets
-        for s in readable:
-            if s is listening_socket:
-                # If the socket is the listening socket, accept the connection
-                client_socket, client_address = s.accept()
-                print("Connection from", client_address)
-                # Add the client socket to the list of sockets to monitor
-                inputs.append(client_socket)
-            else:
-                # Try to receive data from the client
-                try:
-                    data = s.recv(BUFFER_SIZE).decode()
-                except ConnectionResetError:
-                    # If the client closes the connection, remove the socket
-                    print("Connection closed by the client")
-                    inputs.remove(s)
-                    s.close()
-                    continue
-
-                # If the client sends an empty message, close the connection
-                if data == "":
-                    print("Connection closed by the client")
-                    inputs.remove(s)
-                    s.close()
-                    continue
-
-                print("Received data:", data)
-                
-                # Try to break the data into type and message
-                try:
-                    type, data = breakData(data)
-                # Make sure the message is in the correct format
-                except ValueError:
-                    print("Invalid message received. Closing connection.")
-                    inputs.remove(s)
-                    s.close()
-                    continue
-
-                # Handle the message type and send a response
-                response = handleType(type, data)
-                s.send(response.encode())
-
-                # If the client sends a message with type 0, close the connection
-                if type == EXIT_TYPE:
-                    print("Connection closed by the client")
-                    inputs.remove(s)
-                    s.close()
-
-        # Iterate over the exceptional sockets
-        for s in exceptional:
-            # If there is an error with a socket, remove it
-            inputs.remove(s)
-            s.close()
-
-def breakData(data):
-    # Try to break the data into type and message
+def handle_client_data(client_socket, inputs):
+    # Receive the data from the client
     try:
-        # Get the type and message from the data
+        data = client_socket.recv(BUFFER_SIZE).decode()
+    except ConnectionResetError:
+        # Handle the case where the client closes the connection unexpectedly
+        close_connection(client_socket, inputs)
+        return
+
+    # Handle the case where the client closes the connection
+    if not data:
+        close_connection(client_socket, inputs)
+        return
+
+    print("Received data:", data)
+
+    try:
+        # Break the data into the message type and message data
+        type, message_data = break_data(data)
+    except ValueError:
+        # Handle the case where the message format is invalid
+        print("Invalid message received. Closing connection.")
+        close_connection(client_socket, inputs)
+        return
+
+    # Handle the message based on the message type
+    response = handle_type(type, message_data)
+    try:
+        # Send the response to the client
+        client_socket.send(response.encode())
+        print("Sent data:", response)
+    except ConnectionResetError:
+        # Handle the case where the client closes the connection unexpectedly
+        close_connection(client_socket, inputs)
+        return
+
+    # Close the connection if the client requests it
+    if type == EXIT_TYPE:
+        close_connection(client_socket, inputs)
+
+def handle_socket_exception(sock, inputs):
+    print("Socket exception")
+    inputs.remove(sock)
+    sock.close()
+
+def close_connection(sock, inputs):
+    print("Connection closed by the client")
+    inputs.remove(sock)
+    sock.close()
+
+def break_data(data):
+    try:
+        # Extract the message type and message data from the data
         type = int(data[TYPE_INDEX_START:TYPE_INDEX_END], 2)
         data = data[DATA_INDEX_START:]
         return type, data
     except ValueError:
-        # Make sure the type is a valid number
         raise ValueError("Invalid message format.")
 
-def handleType(type, data):
-    # Handle the message type according to the type
+def handle_type(type, data):
+    # Handle the message based on the message type
     if type == EXIT_TYPE:
         return "EXIT"
     elif type == ALBUMS_LIST_TYPE:
-        return getAlbumsList()
+        return ", ".join(data_dict["albumsList"])
     elif type == SONGS_IN_ALBUM_TYPE:
-        return getSongsInAlbum(data)
+        return ", ".join(data_dict["songsInAlbum"].get(data, [SONG_NOT_FOUND_ERROR]))
     elif type == LENGTH_OF_SONG_TYPE:
-        return getLengthOfSong(data)
+        return data_dict["lengthOfSong"].get(data, SONG_NOT_FOUND_ERROR)
     elif type == LYRICS_OF_SONG_TYPE:
-        return getLyricsOfSong(data)
+        return "\n".join(data_dict["lyricsOfSong"].get(data, [SONG_NOT_FOUND_ERROR]))
     elif type == ALBUM_OF_SONG_TYPE:
-        return getAlbumOfSong(data)
+        return data_dict["albumOfSong"].get(data, SONG_NOT_FOUND_ERROR)
     elif type == SONGS_WITH_WORD_IN_TITLE_TYPE:
-        return getSongsWithWordInTitle(data)
+        return ", ".join(data_dict["songsWithWordInTitle"].get(data.lower(), [NO_SONGS_FOUND_ERROR]))
     elif type == SONGS_WITH_WORD_IN_LYRICS_TYPE:
-        return getSongsWithWordInLyrics(data)
+        return ", ".join(data_dict["songsWithWordInLyrics"].get(data.lower(), [NO_SONGS_FOUND_ERROR]))
     else:
         return INVALID_OPTION_ERROR
 
 def getAlbumsList():
     albums = []
-    # Read the entire database file
     with open(DB_FILE, "r") as f:
         for line in f:
-            # If the line starts with a #, it is an album
-            if line[0] == "#":
-                # Add the album's name to the list of albums and not the year of release
-                albums.append(line[1:].split("::")[0])
+            # Check if the line starts with a "#" to indicate an album
+            if line.startswith("#"):
+                # Extract the album name from the line and add it to the list of albums
+                albums.append(line[1:].split("::")[0].strip())
 
-    # If there are no albums in the list, return an error message (will never happen with the provided database file)
-    if(albums == []):
-        print(NO_ALBUMS_FOUND_ERROR)
+    # If there was an error parsing the file, return an error message - not supposed to ever happen - only if the file is corrupted
+    if not albums:
         return NO_ALBUMS_FOUND_ERROR
-
-    # If there are albums in the list, return them as a comma-separated string
-    return ", ".join(albums)
+    return albums
 
 def getSongsInAlbum(album):
-    # Read the entire database file
+    songs = []
     with open(DB_FILE, "r") as f:
         in_target_album = False
-        songs = []
-
         for line in f:
-            # If the line starts with a #, it is an album
+            # Check if the line starts with a "#" to indicate an album
             if line.startswith("#"):
-                # Check if the album is the target album
+                # Check if the album name matches the target album
                 in_target_album = line[1:].split("::")[0].strip() == album
-            # If the line starts with a * and we are in the target album, it is a song within the album
+            # Check if the line starts with a "*" to indicate a song
             elif in_target_album and line.startswith("*"):
-                # Add the song's name to the list of songs
+                # Extract the song name from the line and add it to the list of songs
                 song_name = line[1:].split("::")[0].strip()
-                # Check if the song name is not empty
+                # add the song to the list of songs if it is not empty
                 if song_name:
                     songs.append(song_name)
-
-        # If there are songs in the list, return them as a comma-separated string
-        if songs:
-            return ", ".join(songs)
-
-    # If the album is not found, return an error message (will never happen with the provided database file)
+    if songs:
+        return songs
     return SONG_NOT_FOUND_ERROR
 
 def getLengthOfSong(song):
-    # Read the entire database file
     with open(DB_FILE, "r") as f:
         for line in f:
-            # If the line starts with a *, it is a song
-            if line[0] == "*":
-                # Check if the song is the target song
+            # Check if the line starts with a "*" to indicate a song
+            if line.startswith("*"):
+                # Check if the song name matches the target song
                 if line[1:].split("::")[0] == song:
-                    # Return the length of the song
-                    return line[1:].split("::")[2]
-                
-    # If the song is not found, return an error message
+                    # Extract the length of the song from the line
+                    return line[1:].split("::")[2].strip()
     return SONG_NOT_FOUND_ERROR
 
 def getLyricsOfSong(song):
     lyrics = []
-    # Read the entire database file
     with open(DB_FILE, "r") as f:
         for line in f:
-            # If the line starts with a *, it is a song
-            if line[0] == "*":
-                # Check if the song is the target song
+            # Check if the line starts with a "*" to indicate a song
+            if line.startswith("*"):
+                # Check if the song name matches the target song
                 if line[1:].split("::")[0] == song:
-                    # Add the lyrics to the list of lyrics
+                    # Extract the lyrics of the song from the file
                     lyrics.append(line[1:].split("::")[3].rstrip('\n'))
+                    # Read the rest of the lyrics until the next song or album
                     for line in f:
-                        # Make sure we haven't reached the next song or album
-                        if line[0] == "*" or line[0] == "#":
+                        if line.startswith("*") or line.startswith("#"):
                             break
-                        # Add the lyrics to the list of lyrics
                         lyrics.append(line.rstrip('\n'))
-                    # Return the lyrics as a string
-                    return "\n".join(lyrics)
-                
-    # If the song is not found, return an error message
+                    return lyrics
     return SONG_NOT_FOUND_ERROR
 
 def getAlbumOfSong(song):
-    # Run through all the albums and check if the song is in the album
-    for album in getAlbumsList().split(", "):
-        # If the song is in the album, return the album
-        if song in getSongsInAlbum(album).split(", "):
+    # Find the album that contains the song
+    for album in data_dict["albumsList"]:
+        # Check if the song is in the album
+        if song in data_dict["songsInAlbum"][album]:
             return album
-        
-    # If the song is not found, return an error message
     return SONG_NOT_FOUND_ERROR
 
-def getSongsWithWordInTitle(word):
-    songs = []
-    # Run through all the albums and songs and check if the word is in the song title
-    for album in getAlbumsList().split(", "):
-        # Run through all the songs in the album
-        for song in getSongsInAlbum(album).split(", "):
-            # If the word is in the song title, add the song to the list of songs
-            if word.lower() in song.lower().split():
-                songs.append(song)
-    # If there are no songs in the list, return an error message
-    if(songs == []):
-        print(NO_SONGS_FOUND_ERROR)
-        return NO_SONGS_FOUND_ERROR
-    # If there are songs in the list, return them as a comma-separated string
-    return ", ".join(songs)
-
-def getSongsWithWordInLyrics(word):
-    songs = []
-    # Run through all the albums and songs and check if the word is in the song lyrics
-    for album in getAlbumsList().split(", "):
-        # Run through all the songs in the album
-        for song in getSongsInAlbum(album).split(", "):
-            # If the word is in the song lyrics, add the song to the list of songs
-            if word.lower() in getLyricsOfSong(song).lower().split():
-                songs.append(song)
-    # If there are no songs in the list, return an error message
-    if(songs == []):
-        print(NO_SONGS_FOUND_ERROR)
-        return NO_SONGS_FOUND_ERROR
-    # If there are songs in the list, return them as a comma-separated string
-    return ", ".join(songs)
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
